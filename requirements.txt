@@ -1,0 +1,11 @@
+google-genai
+pandas
+openpyxl
+python-docx
+python-pptx
+extract-msg
+olefile
+striprtf
+odfpy
+# PyInstaller 6.11.0+ is required for Python 3.13 support.
+pyinstaller>=6.11.0

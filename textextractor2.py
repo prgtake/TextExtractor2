@@ -1,0 +1,531 @@
+# -*- coding: utf-8 -*-
+# =====================================================
+#  TextExtractor2 v1.0.0
+#  Copyright (c) 2026 Datan (データン)
+#  Licensed under the MIT License.
+# =====================================================
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import tkinter.simpledialog as sd
+import os
+import json
+import re
+import sqlite3
+import datetime
+import time
+import csv
+import pandas as pd
+import docx
+from pptx import Presentation
+import extract_msg
+from email import policy
+from email.parser import BytesParser
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
+
+# =====================================================
+#  設定とAPI初期化
+# =====================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "app_config.json")
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
+# アプリバージョン
+APP_VERSION = "1.0.0"
+
+def load_config():
+    config = {"GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY"), "MODEL_NAME": DEFAULT_MODEL}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config.update(json.load(f))
+        except:
+            pass
+    return config
+
+def save_config(api_key, model_name):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"GEMINI_API_KEY": api_key, "MODEL_NAME": model_name}, f)
+    except Exception as e:
+        print(f"設定保存失敗: {e}")
+
+class MultiFileGeminiExecutor:
+    def __init__(self, master):
+        self.master = master
+        master.title(f"TextExtractor2 v{APP_VERSION}（サブフォルダ単位抽出）")
+        self.master.geometry("600x520") # ボタンサイズに合わせて微調整
+        self.master.configure(bg="#f5f5f5")
+
+        self.config = load_config()
+        self.api_key = self.config.get("GEMINI_API_KEY")
+        
+        if not self.api_key or self.api_key == "YOUR_API_KEY_HERE":
+            self.api_key = sd.askstring(f"TextExtractor2 v{APP_VERSION}", "Gemini API キーを入力してください：", parent=master)
+            if not self.api_key:
+                messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "APIキーが必要です。終了します。")
+                master.destroy()
+                return
+            save_config(self.api_key, self.config.get("MODEL_NAME"))
+
+        try:
+            self.client = genai.Client(
+                api_key=self.api_key,
+                http_options={'retry_options': {'attempts': 5}}
+            )
+        except Exception as e:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", f"クライアント初期化失敗: {e}")
+            self.client = None
+
+        self.target_folder = None
+        self.prompt_text = None
+        self.prompt_file_path = None
+        self.prompt_name = None
+        self.columns = []
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        # ボタンの幅を統一（19文字分に調整）
+        btn_w = 19
+        btn_style = {"font": ("Meiryo", 9), "width": btn_w, "pady": 2}
+        label_style = {"bg": "#f5f5f5", "font": ("Meiryo", 9)}
+        sakura = "#FFB7C5"
+        leaf = "#99ff99"
+
+        # 1. フォルダ選択
+        f1 = tk.Frame(self.master, bg="#f5f5f5")
+        f1.pack(anchor="w", padx=20, pady=(10, 0))
+        tk.Button(f1, text="処理対象フォルダを指定", command=self.select_folder, **btn_style).pack(side="left")
+        self.folder_label = tk.Label(f1, text="未指定", fg="blue", **label_style)
+        self.folder_label.pack(side="left", padx=10)
+
+        # 2. 指示文選択
+        f2 = tk.Frame(self.master, bg="#f5f5f5")
+        f2.pack(anchor="w", padx=20, pady=5)
+        tk.Button(f2, text="指示ファイル(txt)を指定", command=self.select_prompt_file, **btn_style).pack(side="left")
+        tk.Button(f2, text="書き方ヘルプ", command=self.show_prompt_help, bg="#ffffcc", **btn_style).pack(side="left", padx=5)
+        tk.Button(f2, text="AIと指示文相談", command=self.open_consultation, bg="#e1f5fe", **btn_style).pack(side="left", padx=5)
+        self.prompt_label = tk.Label(f2, text="未指定", fg="blue", **label_style)
+        self.prompt_label.pack(side="left", padx=5)
+
+        # 3. モデル設定
+        f3 = tk.Frame(self.master, bg="#f5f5f5")
+        f3.pack(anchor="w", padx=20, pady=5)
+        tk.Label(f3, text="使用モデル:", **label_style).pack(side="left")
+        self.model_var = tk.StringVar(value=self.config.get("MODEL_NAME", DEFAULT_MODEL))
+        tk.Entry(f3, textvariable=self.model_var, width=25).pack(side="left", padx=5)
+
+        # 4. オプション
+        opt_frame = tk.LabelFrame(self.master, text="実行オプション", bg="#f5f5f5", padx=10, pady=5)
+        opt_frame.pack(fill="x", padx=20, pady=5)
+
+        self.use_web_search = tk.BooleanVar(value=False)
+        tk.Checkbutton(opt_frame, text="WEB検索を利用", variable=self.use_web_search, **label_style).grid(row=0, column=0, sticky="w")
+
+        self.use_file_search = tk.BooleanVar(value=False)
+        tk.Checkbutton(opt_frame, text="RAG(File Search)を利用", variable=self.use_file_search, **label_style).grid(row=0, column=1, sticky="w", padx=20)
+
+        self.use_sqlite_tool = tk.BooleanVar(value=False)
+        tk.Checkbutton(opt_frame, text="SQLiteツールを利用", variable=self.use_sqlite_tool, **label_style).grid(row=1, column=0, sticky="w")
+
+        self.skip_sql_confirm = tk.BooleanVar(value=False)
+        tk.Checkbutton(opt_frame, text="SQL更新時の確認を省略", variable=self.skip_sql_confirm, **label_style).grid(row=1, column=1, sticky="w", padx=20)
+
+        self.skip_processed = tk.BooleanVar(value=True)
+        tk.Checkbutton(opt_frame, text="処理済みファイルをスキップ", variable=self.skip_processed, **label_style).grid(row=2, column=0, sticky="w")
+
+        # 5. RAG選択
+        rag_f = tk.Frame(self.master, bg="#f5f5f5")
+        rag_f.pack(anchor="w", padx=20, pady=2)
+        tk.Label(rag_f, text="使用するRAG:", **label_style).pack(side="left")
+        self.file_search_store = tk.StringVar(value="")
+        self.file_search_dropdown = tk.OptionMenu(rag_f, self.file_search_store, "")
+        self.file_search_dropdown.pack(side="left", padx=5)
+        self.update_rag_list()
+
+        # 6. 実行ボタン
+        btn_f = tk.Frame(self.master, bg="#f5f5f5")
+        btn_f.pack(anchor="w", padx=20, pady=10)
+        self.run_btn = tk.Button(btn_f, text="指示文を実行", bg=sakura, command=self.run_prompt, **btn_style)
+        self.run_btn.pack(side="left")
+        tk.Button(btn_f, text="DBをCSV出力", bg=leaf, command=self.export_db_to_csv, **btn_style).pack(side="left", padx=5)
+
+        # 7. ログエリア
+        log_f = tk.Frame(self.master, bg="#f5f5f5")
+        log_f.pack(fill="both", expand=True, padx=20, pady=5)
+        tk.Label(log_f, text="実行ログ:", **label_style).pack(anchor="w")
+        self.log_area = tk.Text(log_f, height=4, font=("Consolas", 9), state="disabled", bg="white")
+        self.log_area.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(log_f, command=self.log_area.yview)
+        sb.pack(side="right", fill="y")
+        self.log_area.config(yscrollcommand=sb.set)
+
+    def log_message(self, msg):
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{now}] {msg}\n"
+        self.log_area.config(state="normal")
+        self.log_area.insert("end", line)
+        self.log_area.see("end")
+        self.log_area.config(state="disabled")
+        self.master.update()
+
+    def update_rag_list(self):
+        if not self.client: return
+        try:
+            stores = self.client.file_search_stores.list()
+            menu = self.file_search_dropdown["menu"]
+            menu.delete(0, "end")
+            for store in stores:
+                store_id = store.name
+                menu.add_command(label=store.display_name or store_id, command=lambda x=store_id: self.file_search_store.set(x))
+        except:
+            pass
+
+    def show_prompt_help(self):
+        help_text = (
+            "【指示ファイル（プロンプト）の書き方・重要ルール】\n\n"
+            "※文字コードは「UTF-8 (BOMなし)」で保存してください。※\n\n"
+            "以下の3つのセクションで構成してください。\n\n"
+            "① 概要（任意）\n"
+            "   AIに「これから何を解析させるか」を伝えます。\n"
+            "   例：これは裁判の判決文のPDF群です。\n\n"
+            "② 出力項目（必須・1行で記述）\n"
+            "   形式： 出力項目: 項目1, 項目2, 項目3\n"
+            "   ※これがデータベースの「列名」になります。\n\n"
+            "③ 処理指示（必須・項目ごとに指定）\n"
+            "   各項目をどう扱うか指示してください。\n"
+            "   ・【抽出】: ファイル内の情報を抜き出します。推測を禁止します。\n"
+            "   ・【生成】: AIが推論したり、WEB検索を使って補完したりします。\n"
+            "   ・SQLite連携: プロンプト内に『###使用するSQLiteのパス』と \"C:\\フォルダ名\\ファイル名.db\" を記述すると、GeminiがDBを参照・更新できます。実行には「エイリアス名.テーブル名」を使用してください。"
+        )
+        messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", help_text)
+
+    def open_consultation(self):
+        if not self.client:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "APIクライアントが初期化されていません。")
+            return
+        PromptConsultationWindow(self.master, self.client)
+
+    def select_folder(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.target_folder = path
+            self.folder_label.config(text=path)
+
+    def select_prompt_file(self):
+        path = filedialog.askopenfilename(filetypes=[("テキスト", "*.txt")])
+        if not path: return
+        self.prompt_file_path = path
+        self.prompt_name = os.path.splitext(os.path.basename(path))[0]
+        self.prompt_label.config(text=os.path.basename(path))
+        with open(path, "r", encoding="utf-8") as f:
+            self.prompt_text = f.read()
+        m = re.search(r"出力項目[:：]\s*(.+)", self.prompt_text)
+        if not m:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "プロンプトに『出力項目:』が見つかりません。")
+            self.columns = []
+            return
+        self.columns = [c.strip() for c in re.split(r'[,、]', m.group(1))]
+
+    def extract_text_from_any_file(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        content = ""
+        try:
+            if ext in [".txt", ".csv", ".log"]:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            elif ext in [".xlsx", ".xls"]:
+                dict_df = pd.read_excel(file_path, sheet_name=None)
+                for sheet, df in dict_df.items():
+                    content += f"\n[Sheet: {sheet}]\n{df.to_csv(index=False)}"
+            elif ext == ".docx":
+                doc = docx.Document(file_path)
+                content = "\n".join([p.text for p in doc.paragraphs])
+                for table in doc.tables:
+                    for row in table.rows:
+                        content += "\n" + "|".join([cell.text for cell in row.cells])
+            elif ext == ".pptx":
+                prs = Presentation(file_path)
+                content = "\n".join([shape.text for s in prs.slides for shape in s.shapes if hasattr(shape, "text")])
+            elif ext in [".doc", ".ppt", ".jtd"]:
+                import olefile
+                if olefile.isOleFile(file_path):
+                    with olefile.OleFileIO(file_path) as ole:
+                        for s_list in ole.listdir():
+                            s_path = "/".join(s_list)
+                            if any(k in s_path for k in ["WordDocument", "PowerPoint Document", "JS-Main", "Body"]):
+                                with ole.openstream(s_list) as stream:
+                                    data = stream.read()
+                                    try:
+                                        content += data.decode('cp932', errors='ignore')
+                                    except:
+                                        content += "".join([chr(b) if 32 <= b <= 126 or b > 128 else " " for b in data])
+            elif ext == ".rtf":
+                from striprtf.striprtf import rtf_to_text
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = rtf_to_text(f.read())
+            elif ext == ".odt":
+                from odf import text, teletype, opendocument
+                textdoc = opendocument.load(file_path)
+                content = "\n".join([teletype.extractText(p) for p in textdoc.getElementsByType(text.P)])
+            elif ext == ".eml":
+                with open(file_path, 'rb') as f:
+                    msg = BytesParser(policy=policy.default).parse(f)
+                content = f"Subject: {msg['subject']}\nFrom: {msg['from']}\nDate: {msg['date']}\n\n"
+                content += msg.get_body(preferencelist=('plain')).get_content()
+            elif ext == ".msg":
+                msg = extract_msg.Message(file_path)
+                content = f"Subject: {msg.subject}\nFrom: {msg.sender}\nDate: {msg.date}\n\n{msg.body}"
+                msg.close()
+        except Exception as e:
+            self.log_message(f"抽出失敗 ({ext}): {e}")
+        return content
+
+    def execute_sqlite_tool(self, db_path: str, sql_query: str) -> str:
+        query_upper = sql_query.strip().upper()
+        is_select = query_upper.startswith("SELECT") or query_upper.startswith("PRAGMA")
+        if not is_select and not self.skip_sql_confirm.get():
+            confirm = messagebox.askyesno(f"TextExtractor2 v{APP_VERSION}", f"Geminiが更新系クエリを実行しようとしています。\n\nDB: {db_path}\nSQL: {sql_query}")
+            if not confirm: return "Error: User denied the execution."
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            if hasattr(self, 'current_sqlite_paths'):
+                for path in self.current_sqlite_paths:
+                    if os.path.abspath(path) != os.path.abspath(db_path) and os.path.exists(path):
+                        alias = os.path.splitext(os.path.basename(path))[0]
+                        cur.execute(f"ATTACH DATABASE '{path}' AS {alias}")
+            cur.execute(sql_query)
+            if is_select:
+                rows = cur.fetchall()
+                col_names = [d[0] for d in cur.description]
+                res = [dict(zip(col_names, r)) for r in rows]
+                conn.close()
+                return json.dumps(res, ensure_ascii=False)
+            else:
+                conn.commit()
+                affected = conn.total_changes
+                conn.close()
+                return f"Success: {affected} rows affected."
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    def get_system_instruction(self):
+        instruction = (
+            f"\n\n### システムルール (厳守) ###\n"
+            f"1. 出力は必ず以下の項目をキーとするJSON配列形式 [{{...}}, {{...}}] のみを返してください。\n"
+            f"   出力項目: {', '.join(self.columns)}\n"
+            f"2. 各項目について、【抽出】（ファイル内容のみ使用、検索禁止）と【生成】（ツールや知見を使用）を適切に使い分けてください。\n"
+            f"3. 内容が見つからない項目は、推測せず必ず空文字 (\"\") としてください。\n"
+            f"4. 解説、挨拶、Markdownの装飾(```json等)は一切禁止。パース可能な純粋なJSONデータのみを返してください。\n"
+            f"5. 文字化けや不自然な文字列は、文脈から日本語として意味が通じるよう再解釈してください。\n"
+        )
+        if self.use_sqlite_tool.get():
+            instruction += "\n6. SQLite連携が有効です。ATTACHは自動実行済みです。「エイリアス名.テーブル名」で指定してください。\n"
+        return instruction
+
+    def run_prompt(self):
+        if not self.target_folder or not self.prompt_text or not self.columns:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "設定が不足しています。")
+            return
+        model_name = self.model_var.get()
+        save_config(self.api_key, model_name)
+
+        sqlite_paths = []
+        if self.use_sqlite_tool.get():
+            tag = "###使用するSQLiteのパス"
+            if tag not in self.prompt_text:
+                messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", f"SQLite使用にチェックがありますがプロンプト内に「{tag}」がありません。")
+                return
+            sqlite_paths = re.findall(r'"([^"]+\.db(?:sqlite\d?)?)"', self.prompt_text)
+            self.current_sqlite_paths = sqlite_paths
+            for p in sqlite_paths:
+                if not os.path.exists(p):
+                    messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", f"SQLiteファイルが見つかりません: {p}")
+                    return
+
+        self.run_btn.config(state="disabled")
+        self.log_area.config(state="normal")
+        self.log_area.delete("1.0", "end")
+        self.log_area.config(state="disabled")
+        self.log_message("=== 処理開始 ===")
+
+        conn = self.setup_db()
+        cur = conn.cursor()
+
+        try:
+            subfolders = [os.path.join(self.target_folder, d) for d in os.listdir(self.target_folder) if os.path.isdir(os.path.join(self.target_folder, d))]
+            if not subfolders: subfolders = [self.target_folder]
+
+            system_instr = self.get_system_instruction()
+
+            for sub in subfolders:
+                sub_name = os.path.basename(sub)
+                files_in_sub = []
+                for root, _, files in os.walk(sub):
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in [".db", ".exe", ".zip", ".py", ".txt"]: continue
+                        files_in_sub.append(os.path.join(root, f))
+                
+                if not files_in_sub: continue
+
+                self.log_message(f"フォルダ解析中: {sub_name} ({len(files_in_sub)}ファイル)")
+                if self.skip_processed.get():
+                    cur.execute("SELECT COUNT(*) FROM extracted_data WHERE folder_path = ?", (sub,))
+                    if cur.fetchone()[0] > 0:
+                        self.log_message(f"  -> スキップ (処理済み)")
+                        continue
+
+                contents = [f"{self.prompt_text}\n{system_instr}\n\n※サブフォルダ内の複数ファイルを統合して解析してください。\n"]
+                parts = []
+                for f_path in files_in_sub:
+                    ext = os.path.splitext(f_path)[1].lower()
+                    if ext in [".pdf", ".png", ".jpg", ".jpeg", ".webp"]:
+                        with open(f_path, "rb") as f: fb = f.read()
+                        mime = "application/pdf" if ext == ".pdf" else "image/jpeg"
+                        parts.append(types.Part.from_bytes(data=fb, mime_type=mime))
+                    else:
+                        txt = self.extract_text_from_any_file(f_path)
+                        if txt.strip():
+                            contents[0] += f"\n--- ファイル: {os.path.basename(f_path)} ---\n{txt}\n"
+
+                items = self.call_gemini_api(contents + parts, model_name, sqlite_paths)
+                if items:
+                    for item in items:
+                        values = [sub, sub_name, "SUBFOLDER_UNIT", *[str(item.get(col, "")) for col in self.columns], datetime.datetime.now().isoformat()]
+                        cur.execute(f"INSERT INTO extracted_data (folder_path, folder_name, file_path, {','.join(['\"'+c+'\"' for c in self.columns])}, created_at) "
+                                    f"VALUES ({','.join(['?']*len(values))})", values)
+                    conn.commit()
+                    self.log_message(f"  -> 成功 ({len(items)}件)")
+                else:
+                    self.log_message(f"  -> 失敗")
+
+        finally:
+            conn.close()
+            self.run_btn.config(state="normal")
+            self.log_message("=== 完了 ===")
+            messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", "すべての処理が終了しました。")
+
+    def call_gemini_api(self, contents, model_name, sqlite_paths):
+        config = {"response_mime_type": "application/json"}
+        if self.use_web_search.get(): config["tools"] = [{"google_search": {}}]
+        if self.use_file_search.get() and self.file_search_store.get():
+            config.setdefault("tools", []).append({"file_search": {"file_search_store_names": [self.file_search_store.get()]}})
+        if self.use_sqlite_tool.get() and sqlite_paths:
+            config.setdefault("tools", []).append(self.execute_sqlite_tool)
+
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(model=model_name, contents=contents, config=config)
+                match = re.search(r"(\[.*\]|\{.*\})", response.text.strip(), re.DOTALL)
+                if not match: return None
+                parsed = json.loads(match.group(1))
+                return parsed if isinstance(parsed, list) else [parsed]
+            except Exception as e:
+                err_msg = str(e)
+                is_retryable = any(x in err_msg for x in ["429", "503", "500", "504", "UNAVAILABLE", "Resource has been exhausted"])
+                if is_retryable and attempt < max_retries - 1:
+                    wait = 30 * (2 ** attempt)
+                    self.log_message(f"  -> API一時エラー。{wait}秒待機して再試行 ({attempt+1}/{max_retries})")
+                    time.sleep(wait)
+                else:
+                    self.log_message(f"  -> APIエラー: {e}")
+                    break
+        return None
+
+    def setup_db(self):
+        db_path = os.path.join(self.target_folder, f"{self.prompt_name}_DB.db")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(f"CREATE TABLE IF NOT EXISTS extracted_data (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_path TEXT, folder_name TEXT, file_path TEXT, {', '.join([f'\"{c}\" TEXT' for c in self.columns])}, created_at TEXT)")
+        conn.commit()
+        return conn
+
+    def export_db_to_csv(self):
+        if not self.target_folder or not self.prompt_name:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "設定が不足しています。")
+            return
+        db_path = os.path.join(self.target_folder, f"{self.prompt_name}_DB.db")
+        if not os.path.exists(db_path):
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", "DBがありません。")
+            return
+        csv_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not csv_path: return
+        try:
+            conn = sqlite3.connect(db_path)
+            df = pd.read_sql("SELECT * FROM extracted_data", conn)
+            df = df.applymap(lambda x: x.replace("\r\n", " ").replace("\n", " ").replace("\r", " ") if isinstance(x, str) else x)
+            df.to_csv(csv_path, index=False, encoding="utf_8_sig", quoting=csv.QUOTE_ALL)
+            conn.close()
+            messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", "CSV出力完了（セル内改行はスペースに変換されました）")
+        except Exception as e:
+            messagebox.showerror(f"TextExtractor2 v{APP_VERSION}", f"CSV出力に失敗しました: {e}")
+
+class PromptConsultationWindow:
+    def __init__(self, parent, client):
+        self.window = tk.Toplevel(parent)
+        self.window.title(f"TextExtractor2 v{APP_VERSION} - AI指示文相談チャット")
+        self.window.geometry("500x600")
+        self.client = client
+
+        # 自らのソースコードを読み込む
+        try:
+            with open(__file__, "r", encoding="utf-8") as f:
+                source_code = f.read()
+        except:
+            source_code = "ソースコードの読み込みに失敗しました。"
+
+        # システム指示（プロンプト職人としての設定）
+        self.system_instruction = (
+            "あなたは『TextExtractor2』というツールの【指示文作成アドバイザー】です。\n"
+            "このツールのソースコードを以下に提供します。これを読み込み、仕様を完璧に理解してください：\n"
+            f"--- SOURCE CODE START ---\n{source_code}\n--- SOURCE CODE END ---\n\n"
+            "ユーザーの要望を聞き、最適な【指示ファイル（.txt）】の内容を提案してください。\n"
+            "【重要ルール】\n"
+            "1. 回答は常に【簡潔・最小限】にしてください。余計な解説は省き、必要なことだけを返してください。\n"
+            "2. 指示文案（概要、出力項目、処理指示）は、ユーザーがそのままコピペできるよう、必ず「```text ... ```」のようなコードブロック形式で出力してください。\n"
+            "3. 【生成】項目については、どのように生成・推論するか具体的な基準を確認してください。\n"
+            "4. WEB検索、RAG、SQLiteツールの使用有無を必ず確認してください。\n"
+            "5. SQLiteを使用する場合は、使うDB의パスを確認し、実行時に「エイリアス名.テーブル名」という形式を使用するルールを徹底してください。"
+        )
+        self.chat = []
+        self.txt_area = tk.Text(self.window, state="disabled", font=("Meiryo", 9), wrap="word", bg="#fafafa")
+        self.txt_area.pack(fill="both", expand=True, padx=10, pady=10)
+        self.entry = tk.Entry(self.window, font=("Meiryo", 10))
+        self.entry.pack(fill="x", padx=10, pady=(0, 10))
+        self.entry.bind("<Return>", lambda e: self.send_message())
+        btn = tk.Button(self.window, text="送信 (Enter)", command=self.send_message, bg="#e1f5fe")
+        btn.pack(pady=(0, 10))
+        self.display_message("AI", "こんにちは！① どんなファイルが格納されたフォルダから、② どんな項目を抜き出したり生成したりしたいですか？")
+
+    def display_message(self, sender, text):
+        self.txt_area.config(state="normal")
+        self.txt_area.insert("end", f"【{sender}】\n{text}\n\n")
+        self.txt_area.see("end")
+        self.txt_area.config(state="disabled")
+
+    def send_message(self):
+        user_text = self.entry.get()
+        if not user_text.strip(): return
+        self.entry.delete(0, "end")
+        self.display_message("あなた", user_text)
+        self.chat.append({"role": "user", "parts": [user_text]})
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=[self.system_instruction] + [types.Content(role=c["role"], parts=[types.Part.from_text(text=c["parts"][0])]) for c in self.chat]
+            )
+            ai_text = response.text
+            self.display_message("AI", ai_text)
+            self.chat.append({"role": "model", "parts": [ai_text]})
+        except Exception as e:
+            self.display_message("Error", str(e))
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MultiFileGeminiExecutor(root)
+    root.mainloop()
