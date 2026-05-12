@@ -156,17 +156,27 @@ class MultiFileGeminiExecutor:
         log_f = tk.Frame(self.master, bg="#f5f5f5")
         log_f.pack(fill="both", expand=True, padx=20, pady=5)
         tk.Label(log_f, text="実行ログ:", **label_style).pack(anchor="w")
-        self.log_area = tk.Text(log_f, height=4, font=("Consolas", 9), state="disabled", bg="white")
+        self.log_area = tk.Text(log_f, height=6, font=("Consolas", 9), state="disabled", bg="white")
         self.log_area.pack(side="left", fill="both", expand=True)
         sb = tk.Scrollbar(log_f, command=self.log_area.yview)
         sb.pack(side="right", fill="y")
         self.log_area.config(yscrollcommand=sb.set)
 
-    def log_message(self, msg):
+        # ログのタグ設定
+        self.log_area.tag_config("error", foreground="#d32f2f") # Red
+        self.log_area.tag_config("debug", foreground="#757575") # Gray
+        self.log_area.tag_config("info", foreground="#1976d2")  # Blue
+        self.log_area.tag_config("success", foreground="#388e3c") # Green
+        self.log_area.tag_config("warning", foreground="#f57c00") # Orange
+
+    def log_message(self, msg, level="INFO"):
         now = datetime.datetime.now().strftime("%H:%M:%S")
-        line = f"[{now}] {msg}\n"
+        level = level.upper()
+        line = f"[{now}] [{level}] {msg}\n"
+        
+        tag = level.lower()
         self.log_area.config(state="normal")
-        self.log_area.insert("end", line)
+        self.log_area.insert("end", line, tag)
         self.log_area.see("end")
         self.log_area.config(state="disabled")
         self.master.update()
@@ -279,16 +289,25 @@ class MultiFileGeminiExecutor:
                 msg = extract_msg.Message(file_path)
                 content = f"Subject: {msg.subject}\nFrom: {msg.sender}\nDate: {msg.date}\n\n{msg.body}"
                 msg.close()
+
+            if content.strip():
+                self.log_message(f"テキスト抽出成功 ({ext}): {os.path.basename(file_path)} ({len(content)}文字)", "DEBUG")
+            else:
+                self.log_message(f"テキスト抽出結果が空です ({ext}): {os.path.basename(file_path)}", "WARNING")
+
         except Exception as e:
-            self.log_message(f"抽出失敗 ({ext}): {e}")
+            self.log_message(f"抽出失敗 ({ext}): {e}", "ERROR")
         return content
 
     def execute_sqlite_tool(self, db_path: str, sql_query: str) -> str:
+        self.log_message(f"SQLiteツール実行: {sql_query[:100]}...", "DEBUG")
         query_upper = sql_query.strip().upper()
         is_select = query_upper.startswith("SELECT") or query_upper.startswith("PRAGMA")
         if not is_select and not self.skip_sql_confirm.get():
             confirm = messagebox.askyesno(f"TextExtractor2 v{APP_VERSION}", f"Geminiが更新系クエリを実行しようとしています。\n\nDB: {db_path}\nSQL: {sql_query}")
-            if not confirm: return "Error: User denied the execution."
+            if not confirm: 
+                self.log_message("ユーザーによりSQL実行が拒否されました。", "WARNING")
+                return "Error: User denied the execution."
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -303,13 +322,16 @@ class MultiFileGeminiExecutor:
                 col_names = [d[0] for d in cur.description]
                 res = [dict(zip(col_names, r)) for r in rows]
                 conn.close()
+                self.log_message(f"SQL取得成功: {len(rows)}件", "DEBUG")
                 return json.dumps(res, ensure_ascii=False)
             else:
                 conn.commit()
                 affected = conn.total_changes
                 conn.close()
+                self.log_message(f"SQL更新成功: {affected}行に影響", "DEBUG")
                 return f"Success: {affected} rows affected."
         except Exception as e:
+            self.log_message(f"SQL実行エラー: {e}", "ERROR")
             return f"Error: {str(e)}"
 
     def get_system_instruction(self):
@@ -350,18 +372,23 @@ class MultiFileGeminiExecutor:
         self.log_area.config(state="normal")
         self.log_area.delete("1.0", "end")
         self.log_area.config(state="disabled")
-        self.log_message("=== 処理開始 ===")
+        self.log_message(f"=== 処理開始 (Model: {model_name}) ===")
+        self.log_message(f"対象フォルダ: {self.target_folder}")
 
         conn = self.setup_db()
         cur = conn.cursor()
 
         try:
             subfolders = [os.path.join(self.target_folder, d) for d in os.listdir(self.target_folder) if os.path.isdir(os.path.join(self.target_folder, d))]
-            if not subfolders: subfolders = [self.target_folder]
+            if not subfolders: 
+                subfolders = [self.target_folder]
+                self.log_message("サブフォルダが見つかりません。対象フォルダ自体を1つの単位として処理します。", "DEBUG")
+
+            self.log_message(f"合計処理単位数: {len(subfolders)}")
 
             system_instr = self.get_system_instruction()
 
-            for sub in subfolders:
+            for i, sub in enumerate(subfolders):
                 sub_name = os.path.basename(sub)
                 files_in_sub = []
                 for root, _, files in os.walk(sub):
@@ -369,14 +396,16 @@ class MultiFileGeminiExecutor:
                         ext = os.path.splitext(f)[1].lower()
                         if ext in [".db", ".exe", ".zip", ".py", ".txt"]: continue
                         files_in_sub.append(os.path.join(root, f))
-                
-                if not files_in_sub: continue
 
-                self.log_message(f"フォルダ解析中: {sub_name} ({len(files_in_sub)}ファイル)")
+                if not files_in_sub:
+                    self.log_message(f"[{i+1}/{len(subfolders)}] フォルダ空につきスキップ: {sub_name}", "DEBUG")
+                    continue
+
+                self.log_message(f"[{i+1}/{len(subfolders)}] 解析中: {sub_name} ({len(files_in_sub)}ファイル)")
                 if self.skip_processed.get():
                     cur.execute("SELECT COUNT(*) FROM extracted_data WHERE folder_path = ?", (sub,))
                     if cur.fetchone()[0] > 0:
-                        self.log_message(f"  -> スキップ (処理済み)")
+                        self.log_message(f"  -> スキップ (処理済み記録あり)")
                         continue
 
                 contents = [f"{self.prompt_text}\n{system_instr}\n\n※サブフォルダ内の複数ファイルを統合して解析してください。\n"]
@@ -384,6 +413,7 @@ class MultiFileGeminiExecutor:
                 for f_path in files_in_sub:
                     ext = os.path.splitext(f_path)[1].lower()
                     if ext in [".pdf", ".png", ".jpg", ".jpeg", ".webp"]:
+                        self.log_message(f"  -> バイナリ添付: {os.path.basename(f_path)}", "DEBUG")
                         with open(f_path, "rb") as f: fb = f.read()
                         mime = "application/pdf" if ext == ".pdf" else "image/jpeg"
                         parts.append(types.Part.from_bytes(data=fb, mime_type=mime))
@@ -399,43 +429,64 @@ class MultiFileGeminiExecutor:
                         cur.execute(f"INSERT INTO extracted_data (folder_path, folder_name, file_path, {','.join(['\"'+c+'\"' for c in self.columns])}, created_at) "
                                     f"VALUES ({','.join(['?']*len(values))})", values)
                     conn.commit()
-                    self.log_message(f"  -> 成功 ({len(items)}件)")
+                    self.log_message(f"  -> 成功 ({len(items)}件のデータを保存)", "SUCCESS")
                 else:
-                    self.log_message(f"  -> 失敗")
+                    self.log_message(f"  -> 失敗 (このフォルダの解析結果が得られませんでした)", "ERROR")
+
+        except Exception as main_e:
+            self.log_message(f"実行中に致命的なエラーが発生しました: {main_e}", "ERROR")
 
         finally:
             conn.close()
             self.run_btn.config(state="normal")
-            self.log_message("=== 完了 ===")
+            self.log_message("=== すべての処理が完了しました ===")
             messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", "すべての処理が終了しました。")
 
     def call_gemini_api(self, contents, model_name, sqlite_paths):
         config = {"response_mime_type": "application/json"}
-        if self.use_web_search.get(): config["tools"] = [{"google_search": {}}]
+        if self.use_web_search.get(): 
+            config["tools"] = [{"google_search": {}}]
+            self.log_message("WEB検索ツールを有効化", "DEBUG")
         if self.use_file_search.get() and self.file_search_store.get():
             config.setdefault("tools", []).append({"file_search": {"file_search_store_names": [self.file_search_store.get()]}})
+            self.log_message(f"RAG有効化: {self.file_search_store.get()}", "DEBUG")
         if self.use_sqlite_tool.get() and sqlite_paths:
             config.setdefault("tools", []).append(self.execute_sqlite_tool)
+            self.log_message(f"SQLiteツール有効化 ({len(sqlite_paths)}個のDB)", "DEBUG")
 
         max_retries = 5
         for attempt in range(max_retries):
             try:
+                self.log_message(f"APIリクエスト送信中 (試行 {attempt+1}/{max_retries})...", "DEBUG")
                 response = self.client.models.generate_content(model=model_name, contents=contents, config=config)
-                match = re.search(r"(\[.*\]|\{.*\})", response.text.strip(), re.DOTALL)
-                if not match: return None
+
+                # トークン使用量の記録
+                if hasattr(response, 'usage_metadata'):
+                    meta = response.usage_metadata
+                    self.log_message(f"トークン使用量: 入力={meta.prompt_token_count}, 出力={meta.candidates_token_count}, 合計={meta.total_token_count}", "DEBUG")
+
+                raw_text = response.text.strip()
+                match = re.search(r"(\[.*\]|\{.*\})", raw_text, re.DOTALL)
+                if not match: 
+                    self.log_message("API応答からJSONが見つかりませんでした。応答内容:", "ERROR")
+                    self.log_message(raw_text[:500] + ("..." if len(raw_text) > 500 else ""), "DEBUG")
+                    return None
+
                 parsed = json.loads(match.group(1))
                 return parsed if isinstance(parsed, list) else [parsed]
+
             except Exception as e:
                 err_msg = str(e)
                 is_retryable = any(x in err_msg for x in ["429", "503", "500", "504", "UNAVAILABLE", "Resource has been exhausted"])
                 if is_retryable and attempt < max_retries - 1:
                     wait = 30 * (2 ** attempt)
-                    self.log_message(f"  -> API一時エラー。{wait}秒待機して再試行 ({attempt+1}/{max_retries})")
+                    self.log_message(f"一時エラー ({err_msg})。{wait}秒待機して再試行...", "WARNING")
                     time.sleep(wait)
                 else:
-                    self.log_message(f"  -> APIエラー: {e}")
+                    self.log_message(f"APIエラー: {e}", "ERROR")
                     break
         return None
+
 
     def setup_db(self):
         db_path = os.path.join(self.target_folder, f"{self.prompt_name}_DB.db")
