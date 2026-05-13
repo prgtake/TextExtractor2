@@ -14,6 +14,20 @@ Google Gemini API (2.5 Flash Lite / 2.0 Flash) を活用した、サブフォル
 
 ---
 
+## 高精度な解析のためのコツ (重要)
+
+AI（Gemini）は「頭の中」だけで複雑な計算や推論を行うと、ミスをしやすくなる性質があります。
+
+- **計算の根拠を先に出力させる:**
+  「合計点」だけを求めるのではなく、必ず「各科目の点数」も出力項目に含め、AIに先に書き出させるようにしてください。
+  **AIは自分が直前に書き出した正確な数値を参照することで、計算精度が劇的に向上します。**
+  例：「国語点数, 数学点数, 5科目合計点」の順で項目を作る。
+
+- **【抽出】と【生成】の明示:**
+  指示文内で「【抽出】: 資料からそのまま抜き出す」「【生成】: 資料を元にAIが考える」と役割を分けることで、推測によるハルシネーション（嘘）を防ぐことができます。
+
+---
+
 ## 活用のアイデア
 
 1.  **生徒・顧客カルテの自動作成:** 氏名ごとのフォルダ内のテスト結果や面談記録を統合し、一人ひとりの傾向を DB 化。
@@ -44,4 +58,68 @@ pip install google-genai pandas openpyxl python-docx python-pptx extract-msg ole
 
 ## ライセンス
 Copyright (c) 2026 Datan (データン).
+Licensed under the MIT License.
+
+---
+
+# TextExtractor2 (Subfolder-Unit Extraction)
+
+A highly advanced integrated analysis and structuring tool utilizing Google Gemini API (2.5 Flash Lite / 2.0 Flash). 
+It treats the "folder structure" organized by humans as the unit of AI analysis, transforming scattered documents into a "meaningful database" in an instant.
+
+## Key Features (TextExtractor2)
+
+- **Subfolder-Unit Integrated Analysis:** Recognizes each subfolder within a target folder as a "single persona" or "single case." AI reads multiple PDFs, images, Office documents, emails, etc., inside and extracts them as a single record.
+- **AI Prompt Consultation Chat:** Solves the problem of "not knowing how to write instructions." Just tell the AI what you want to do in a chat format, and it will immediately propose the best copiable prompt.
+- **Automatic SQLite Database Generation:** Extraction results are automatically saved to SQLite (.db). Data stays organized even after processing thousands of folders and can be exported to CSV at any time.
+- **SQLite Tool Integration:** AI can directly reference and update existing databases. Allows for advanced data generation including master matching and duplication checks.
+- **Robust Extraction Capabilities:** Supports a wide range of formats from standard PDF/Images to Ichitaro (.jtd), old Office formats (.doc, .ppt), Emails (.eml, .msg), RTF, and ODT.
+- **Professional Design:** Features exponential backoff and retry for API limits, processed skip functionality, and a compact, polished UI.
+
+---
+
+## Tips for High Accuracy (Important)
+
+AI (Gemini) tends to make mistakes when performing complex calculations or reasoning only "in its head."
+
+- **Output Calculation Sources First:**
+  Instead of asking only for the "Total Score," always include the "Scores for each subject" in the output items and have the AI write them out first.
+  **AI dramatically improves its calculation accuracy by referring to the precise numbers it has just written.**
+  Example: Create items in the order of "Math Score, English Score, Total Score."
+
+- **Explicit use of 【Extraction】 and 【Generation】:**
+  By distinguishing roles in the instructions—"【Extraction】: Extract exactly from materials" and "【Generation】: AI thinks based on materials"—you can prevent hallucinations (false information) caused by guesswork.
+
+---
+
+## Usage Ideas
+
+1.  **Automatic Student/Customer Records:** Integrate test results and interview records in subfolders for each individual to create a database of trends.
+2.  **Organization of Complex Legal Cases:** Read through evidence documents and judgments in case folders to organize issues and timelines.
+3.  **Annual Business/Financial Analysis:** Summarize various statements stored in annual folders to list the transition of key indicators.
+4.  **Property/Branch Management:** Score all locations based on the same criteria from survey materials in branch folders without visiting the sites.
+
+---
+
+## Setup
+
+### Requirements
+- Python 3.9 or higher (Python 3.13 supported)
+- Google Gemini API Key
+
+### Installation
+```bash
+pip install google-genai pandas openpyxl python-docx python-pptx extract-msg olefile striprtf odfpy pyinstaller
+```
+
+## How to Use
+1. Start the program.
+2. **"Select Target Folder"**: Choose the parent folder containing subfolders.
+3. **"AI Prompt Consultation"**: Decide on "Output Items" and "Instructions" with AI and create a prompt file (.txt).
+4. **"Select Prompt File (txt)"**: Load the created file.
+5. **"Run Prompt"**: Analysis starts, and results are accumulated in SQLite.
+6. **"Export DB to CSV"**: Export the results to a CSV file that can be opened in Excel, etc.
+
+## License
+Copyright (c) 2026 Datan.
 Licensed under the MIT License.

@@ -202,13 +202,13 @@ class MultiFileGeminiExecutor:
             "   AIに「これから何を解析させるか」を伝えます。\n"
             "   例：これは裁判の判決文のPDF群です。\n\n"
             "② 出力項目（必須・1行で記述）\n"
-            "   形式： 出力項目: 項目1, 項目2, 項目3\n"
-            "   ※これがデータベースの「列名」になります。\n\n"
+            "   形式： 出力項目: 項目1, 項目2, 項目3\n\n"
             "③ 処理指示（必須・項目ごとに指定）\n"
-            "   各項目をどう扱うか指示してください。\n"
             "   ・【抽出】: ファイル内の情報を抜き出します。推測を禁止します。\n"
-            "   ・【生成】: AIが推論したり、WEB検索を使って補完したりします。\n"
-            "   ・SQLite連携: プロンプト内に『###使用するSQLiteのパス』と \"C:\\フォルダ名\\ファイル名.db\" を記述すると、GeminiがDBを参照・更新できます。実行には「エイリアス名.テーブル名」を使用してください。"
+            "   ・【生成】: AIが推論したり、WEB検索を使って補完したりします。\n\n"
+            "【高精度に計算させるコツ】\n"
+            "AIは「頭の中」だけで計算するとミスをしやすい性質があります。\n"
+            "合計点や判定を求める場合は、必ずその「根拠となる数値（各科目の点数など）」も出力項目に含め、先に書き出させるようにしてください。これだけで計算精度が劇的に向上します。"
         )
         messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", help_text)
 
@@ -343,9 +343,10 @@ class MultiFileGeminiExecutor:
             f"3. 内容が見つからない項目は、推測せず必ず空文字 (\"\") としてください。\n"
             f"4. 解説、挨拶、Markdownの装飾(```json等)は一切禁止。パース可能な純粋なJSONデータのみを返してください。\n"
             f"5. 文字化けや不自然な文字列は、文脈から日本語として意味が通じるよう再解釈してください。\n"
+            f"6. ファイルの「フルパス」や「保存日時」の情報と「ファイル自体の記述内容」が矛盾する場合（例：フォルダ名と書類内の氏名が異なる等）は、必ず【ファイル自体の記述内容】を真実として優先してください。\n"
         )
         if self.use_sqlite_tool.get():
-            instruction += "\n6. SQLite連携が有効です。ATTACHは自動実行済みです。「エイリアス名.テーブル名」で指定してください。\n"
+            instruction += "\n7. SQLite連携が有効です。ATTACHは自動実行済みです。「エイリアス名.テーブル名」で指定してください。\n"
         return instruction
 
     def run_prompt(self):
@@ -412,15 +413,20 @@ class MultiFileGeminiExecutor:
                 parts = []
                 for f_path in files_in_sub:
                     ext = os.path.splitext(f_path)[1].lower()
+                    full_path = os.path.abspath(f_path)
+                    mtime = os.path.getmtime(f_path)
+                    save_time = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
                     if ext in [".pdf", ".png", ".jpg", ".jpeg", ".webp"]:
                         self.log_message(f"  -> バイナリ添付: {os.path.basename(f_path)}", "DEBUG")
+                        contents[0] += f"\n--- バイナリファイル: {full_path} (保存日時: {save_time}) ---\n"
                         with open(f_path, "rb") as f: fb = f.read()
                         mime = "application/pdf" if ext == ".pdf" else "image/jpeg"
                         parts.append(types.Part.from_bytes(data=fb, mime_type=mime))
                     else:
                         txt = self.extract_text_from_any_file(f_path)
                         if txt.strip():
-                            contents[0] += f"\n--- ファイル: {os.path.basename(f_path)} ---\n{txt}\n"
+                            contents[0] += f"\n--- ファイル: {full_path} (保存日時: {save_time}) ---\n{txt}\n"
 
                 items = self.call_gemini_api(contents + parts, model_name, sqlite_paths)
                 if items:
