@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =====================================================
-#  TextExtractor2 v1.0.0
+#  TextExtractor2 v1.1.0
 #  Copyright (c) 2026 Datan (データン)
 #  Licensed under the MIT License.
 # =====================================================
@@ -32,7 +32,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "app_config.json")
 DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 # アプリバージョン
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 def load_config():
     config = {"GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY"), "MODEL_NAME": DEFAULT_MODEL}
@@ -130,11 +130,8 @@ class MultiFileGeminiExecutor:
         self.use_sqlite_tool = tk.BooleanVar(value=False)
         tk.Checkbutton(opt_frame, text="SQLiteツールを利用", variable=self.use_sqlite_tool, **label_style).grid(row=1, column=0, sticky="w")
 
-        self.skip_sql_confirm = tk.BooleanVar(value=False)
-        tk.Checkbutton(opt_frame, text="SQL更新時の確認を省略", variable=self.skip_sql_confirm, **label_style).grid(row=1, column=1, sticky="w", padx=20)
-
         self.skip_processed = tk.BooleanVar(value=True)
-        tk.Checkbutton(opt_frame, text="処理済みファイルをスキップ", variable=self.skip_processed, **label_style).grid(row=2, column=0, sticky="w")
+        tk.Checkbutton(opt_frame, text="処理済みファイルをスキップ", variable=self.skip_processed, **label_style).grid(row=1, column=1, sticky="w", padx=20)
 
         # 5. RAG選択
         rag_f = tk.Frame(self.master, bg="#f5f5f5")
@@ -199,15 +196,24 @@ class MultiFileGeminiExecutor:
             "※文字コードは「UTF-8 (BOMなし)」で保存してください。※\n\n"
             "以下の3つのセクションで構成してください。\n\n"
             "① 概要（任意）\n"
-            "   AIに「これから何を解析させるか」を伝えます。\n"
-            "   例：これは裁判の判決文のPDF群です。\n\n"
+            "   AIに「これから何を解析させるか」を伝えます。\n\n"
             "② 出力項目（必須・1行で記述）\n"
             "   形式： 出力項目: 項目1, 項目2, 項目3\n\n"
             "③ 処理指示（必須・項目ごとに指定）\n"
-            "   ・【抽出】: ファイル内の情報を抜き出します。推測を禁止します。\n"
-            "   ・【生成】: AIが推論したり、WEB検索を使って補完したりします。\n\n"
+            "   各項目に対し、以下のタグを使い分けて指示を書きます。\n"
+            "   ・【抽出】: 資料からそのまま抜き出す（推測禁止）。\n"
+            "   ・【生成】: 資料を元にAIが考える、またはツールを使う。\n\n"
+            "【指示ファイルの記述例】\n"
+            "----------------------------------------\n"
+            "これは取引先からの見積書と提案書のセットです。\n\n"
+            "出力項目: 会社名, 合計金額, 提案の要約, 印象評価\n\n"
+            "### 処理指示\n"
+            "【会社名】：【抽出】見積書に記載されている発行元の会社名。\n"
+            "【合計金額】：【抽出】見積書の税込み合計金額。数値のみ。\n"
+            "【提案の要約】：【生成】提案書の内容を100文字以内で要約。\n"
+            "【印象評価】：【生成】提案内容が革新的か保守的か判定してください。\n"
+            "----------------------------------------\n\n"
             "【高精度に計算させるコツ】\n"
-            "AIは「頭の中」だけで計算するとミスをしやすい性質があります。\n"
             "合計点や判定を求める場合は、必ずその「根拠となる数値（各科目の点数など）」も出力項目に含め、先に書き出させるようにしてください。これだけで計算精度が劇的に向上します。"
         )
         messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", help_text)
@@ -302,12 +308,13 @@ class MultiFileGeminiExecutor:
     def execute_sqlite_tool(self, db_path: str, sql_query: str) -> str:
         self.log_message(f"SQLiteツール実行: {sql_query[:100]}...", "DEBUG")
         query_upper = sql_query.strip().upper()
-        is_select = query_upper.startswith("SELECT") or query_upper.startswith("PRAGMA")
-        if not is_select and not self.skip_sql_confirm.get():
-            confirm = messagebox.askyesno(f"TextExtractor2 v{APP_VERSION}", f"Geminiが更新系クエリを実行しようとしています。\n\nDB: {db_path}\nSQL: {sql_query}")
-            if not confirm: 
-                self.log_message("ユーザーによりSQL実行が拒否されました。", "WARNING")
-                return "Error: User denied the execution."
+        # 参照系（SELECT, PRAGMA）以外の実行を厳格に禁止
+        is_read_only = query_upper.startswith("SELECT") or query_upper.startswith("PRAGMA")
+        
+        if not is_read_only:
+            self.log_message(f"更新系SQLがブロックされました: {sql_query[:50]}", "WARNING")
+            return "Error: This tool is strictly read-only. Only SELECT or PRAGMA queries are allowed."
+
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -316,20 +323,15 @@ class MultiFileGeminiExecutor:
                     if os.path.abspath(path) != os.path.abspath(db_path) and os.path.exists(path):
                         alias = os.path.splitext(os.path.basename(path))[0]
                         cur.execute(f"ATTACH DATABASE '{path}' AS {alias}")
+            
             cur.execute(sql_query)
-            if is_select:
-                rows = cur.fetchall()
-                col_names = [d[0] for d in cur.description]
-                res = [dict(zip(col_names, r)) for r in rows]
-                conn.close()
-                self.log_message(f"SQL取得成功: {len(rows)}件", "DEBUG")
-                return json.dumps(res, ensure_ascii=False)
-            else:
-                conn.commit()
-                affected = conn.total_changes
-                conn.close()
-                self.log_message(f"SQL更新成功: {affected}行に影響", "DEBUG")
-                return f"Success: {affected} rows affected."
+            rows = cur.fetchall()
+            col_names = [d[0] for d in cur.description] if cur.description else []
+            res = [dict(zip(col_names, r)) for r in rows]
+            conn.close()
+            self.log_message(f"SQL取得成功: {len(rows)}件", "DEBUG")
+            return json.dumps(res, ensure_ascii=False)
+            
         except Exception as e:
             self.log_message(f"SQL実行エラー: {e}", "ERROR")
             return f"Error: {str(e)}"
@@ -448,51 +450,163 @@ class MultiFileGeminiExecutor:
             self.log_message("=== すべての処理が完了しました ===")
             messagebox.showinfo(f"TextExtractor2 v{APP_VERSION}", "すべての処理が終了しました。")
 
-    def call_gemini_api(self, contents, model_name, sqlite_paths):
-        config = {"response_mime_type": "application/json"}
-        if self.use_web_search.get(): 
-            config["tools"] = [{"google_search": {}}]
-            self.log_message("WEB検索ツールを有効化", "DEBUG")
-        if self.use_file_search.get() and self.file_search_store.get():
-            config.setdefault("tools", []).append({"file_search": {"file_search_store_names": [self.file_search_store.get()]}})
-            self.log_message(f"RAG有効化: {self.file_search_store.get()}", "DEBUG")
-        if self.use_sqlite_tool.get() and sqlite_paths:
-            config.setdefault("tools", []).append(self.execute_sqlite_tool)
-            self.log_message(f"SQLiteツール有効化 ({len(sqlite_paths)}個のDB)", "DEBUG")
+    def _execute_api_call(self, contents, config, model_name, purpose="API"):
+        # contents: List of parts (str or types.Part) or a single string
+        if isinstance(contents, str):
+            contents = [contents]
+        
+        # ツール呼び出しのループ（最大10回）
+        messages = [types.Content(role="user", parts=[
+            types.Part.from_text(text=p) if isinstance(p, str) else p for p in contents
+        ])]
 
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                self.log_message(f"APIリクエスト送信中 (試行 {attempt+1}/{max_retries})...", "DEBUG")
-                response = self.client.models.generate_content(model=model_name, contents=contents, config=config)
-
-                # トークン使用量の記録
-                if hasattr(response, 'usage_metadata'):
-                    meta = response.usage_metadata
-                    self.log_message(f"トークン使用量: 入力={meta.prompt_token_count}, 出力={meta.candidates_token_count}, 合計={meta.total_token_count}", "DEBUG")
-
-                raw_text = response.text.strip()
-                match = re.search(r"(\[.*\]|\{.*\})", raw_text, re.DOTALL)
-                if not match: 
-                    self.log_message("API応答からJSONが見つかりませんでした。応答内容:", "ERROR")
-                    self.log_message(raw_text[:500] + ("..." if len(raw_text) > 500 else ""), "DEBUG")
-                    return None
-
-                parsed = json.loads(match.group(1))
-                return parsed if isinstance(parsed, list) else [parsed]
-
-            except Exception as e:
-                err_msg = str(e)
-                is_retryable = any(x in err_msg for x in ["429", "503", "500", "504", "UNAVAILABLE", "Resource has been exhausted"])
-                if is_retryable and attempt < max_retries - 1:
-                    wait = 30 * (2 ** attempt)
-                    self.log_message(f"一時エラー ({err_msg})。{wait}秒待機して再試行...", "WARNING")
-                    time.sleep(wait)
-                else:
-                    self.log_message(f"APIエラー: {e}", "ERROR")
+        for turn in range(10):
+            max_retries = 5
+            response = None
+            for attempt in range(max_retries):
+                try:
+                    self.log_message(f"[{purpose}] APIリクエスト中 (試行 {attempt+1}/{max_retries}, ターン {turn+1})...", "DEBUG")
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=messages,
+                        config=config
+                    )
                     break
+                except Exception as e:
+                    err_msg = str(e)
+                    is_retryable = any(x in err_msg for x in ["429", "503", "500", "504", "UNAVAILABLE", "Resource has been exhausted"])
+                    if is_retryable and attempt < max_retries - 1:
+                        wait = 30 * (2 ** attempt)
+                        self.log_message(f"一時エラー ({err_msg})。{wait}秒待機して再試行...", "WARNING")
+                        time.sleep(wait)
+                    else:
+                        self.log_message(f"APIエラー: {e}", "ERROR")
+                        return None
+
+            if not response or not response.candidates:
+                return None
+
+            # トークン使用量の記録
+            if hasattr(response, 'usage_metadata'):
+                meta = response.usage_metadata
+                self.log_message(f"トークン使用量: 入力={meta.prompt_token_count}, 出力={meta.candidates_token_count}", "DEBUG")
+
+            cand = response.candidates[0]
+            if not cand.content or not cand.content.parts:
+                return response
+
+            messages.append(cand.content)
+
+            # ツール呼び出し（Function Calling）の抽出
+            tool_calls = [p.function_call for p in cand.content.parts if p.function_call]
+            if not tool_calls:
+                return response
+
+            # ツールの実行とレスポンスの生成
+            tool_responses = []
+            for call in tool_calls:
+                if call.name == "execute_sqlite_tool":
+                    sql = call.args.get("sql_query")
+                    # 第一パス目に使用されるDBパス（通常はプロンプト内で指定されたもの）
+                    target_db = self.current_sqlite_paths[0] if hasattr(self, 'current_sqlite_paths') and self.current_sqlite_paths else ""
+                    res_val = self.execute_sqlite_tool(target_db, sql)
+                    tool_responses.append(types.Part.from_function_response(
+                        name=call.name, response={"result": res_val}
+                    ))
+                else:
+                    tool_responses.append(types.Part.from_function_response(
+                        name=call.name, response={"error": f"Unknown tool: {call.name}"}
+                    ))
+
+            if tool_responses:
+                messages.append(types.Content(role="user", parts=tool_responses))
+            else:
+                return response
         return None
 
+    def call_gemini_api(self, contents, model_name, sqlite_paths):
+        # contents[0] はシステム指示含むプロンプト、残りはバイナリパーツ
+        original_prompt = contents[0]
+        binary_parts = contents[1:]
+        
+        has_web = self.use_web_search.get()
+        has_fss = self.use_file_search.get() and self.file_search_store.get()
+        has_sqlite = self.use_sqlite_tool.get() and sqlite_paths
+
+        # ツールが1つ以下なら、効率のため単一リクエストで実行
+        active_tools_count = sum([bool(has_web), bool(has_fss), bool(bool(has_sqlite))])
+
+        if active_tools_count <= 1:
+            config = {"system_instruction": self.get_system_instruction(sqlite_paths), "response_mime_type": "application/json"}
+            if has_web:
+                config["tools"] = [{"google_search": {}}]
+                del config["response_mime_type"]
+            elif has_fss:
+                config["tools"] = [{"file_search": {"file_search_store_names": [self.file_search_store.get()]}}]
+                del config["response_mime_type"]
+            elif has_sqlite:
+                config["tools"] = [self.execute_sqlite_tool]
+                del config["response_mime_type"]
+            
+            res = self._execute_api_call(contents, config, model_name, purpose="AI直接解析")
+            return self._parse_response(res)
+
+        # 複数ツールがある場合は、逐次リサーチステージ（制限回避）
+        self.log_message("複数ツールが選択されたため、逐次リサーチを開始します。", "INFO")
+        combined_research = ""
+
+        # 1. WEB検索
+        if has_web:
+            cfg = {"tools": [{"google_search": {}}]}
+            prompt = f"以下の指示に基づいて、WEB検索を行い必要な情報を調査してください。回答は調査結果のまとめのみを返してください。\n\n{original_prompt}"
+            res = self._execute_api_call(prompt, cfg, model_name, purpose="WEB検索")
+            if res and res.text:
+                combined_research += f"### WEB検索結果:\n{res.text}\n\n"
+
+        # 2. RAG(File Search)
+        if has_fss:
+            cfg = {"tools": [{"file_search": {"file_search_store_names": [self.file_search_store.get()]}}]}
+            prompt = f"以下の調査成果と指示に基づき、RAG(File Search)を用いて追加情報を調査してください。\n\n【これまでの調査成果】\n{combined_research}\n\n【元の指示】\n{original_prompt}"
+            res = self._execute_api_call(prompt, cfg, model_name, purpose="RAG検索")
+            if res and res.text:
+                combined_research += f"### RAG(File Search)結果:\n{res.text}\n\n"
+
+        # 3. SQLiteツール
+        if has_sqlite:
+            # SQLiteの場合はシステムプロンプトのスキーマ情報が必要なため get_system_instruction を考慮
+            cfg = {"system_instruction": self.get_system_instruction(), "tools": [self.execute_sqlite_tool]}
+            db_prompt = f"以下の調査成果と指示に基づき、SQLiteツールを用いて必要なデータを取得してください。\n\n【これまでの調査成果】\n{combined_research}\n\n【元の指示】\n{original_prompt}"
+            res = self._execute_api_call(db_prompt, cfg, model_name, purpose="DB検索")
+            if res and res.text:
+                combined_research += f"### SQLiteツール結果:\n{res.text}\n\n"
+
+        # 4. 最終統合：全ての成果を統合してJSON出力
+        self.log_message("最終的なデータ統合とJSON生成を実行中...", "INFO")
+        final_prompt = (
+            f"これまでの全ての調査結果と添付されたファイルを統合し、最終的な抽出結果をJSON形式で出力してください。\n\n"
+            f"【調査結果まとめ】\n{combined_research}\n\n"
+            f"【元の指示とシステムルール】\n{original_prompt}"
+        )
+        # ツールなしの最終段階で JSON Mode を使用
+        final_config = {"response_mime_type": "application/json"}
+        res = self._execute_api_call([final_prompt] + binary_parts, final_config, model_name, purpose="最終統合")
+        return self._parse_response(res)
+
+    def _parse_response(self, response):
+        if not response or not hasattr(response, 'text'):
+            return None
+        raw_text = response.text.strip()
+        match = re.search(r"(\[.*\]|\{.*\})", raw_text, re.DOTALL)
+        if not match:
+            self.log_message("API応答からJSONが見つかりませんでした。", "ERROR")
+            self.log_message(raw_text[:500], "DEBUG")
+            return None
+        try:
+            parsed = json.loads(match.group(1))
+            return parsed if isinstance(parsed, list) else [parsed]
+        except Exception as e:
+            self.log_message(f"JSONパースエラー: {e}", "ERROR")
+            return None
 
     def setup_db(self):
         db_path = os.path.join(self.target_folder, f"{self.prompt_name}_DB.db")
@@ -531,10 +645,17 @@ class PromptConsultationWindow:
 
         # 自らのソースコードを読み込む
         try:
-            with open(__file__, "r", encoding="utf-8") as f:
+            import sys
+            import os
+            if hasattr(sys, '_MEIPASS'):
+                source_path = os.path.join(sys._MEIPASS, "textextractor2.py")
+            else:
+                source_path = os.path.abspath(__file__)
+                
+            with open(source_path, "r", encoding="utf-8") as f:
                 source_code = f.read()
-        except:
-            source_code = "ソースコードの読み込みに失敗しました。"
+        except Exception as e:
+            source_code = f"ソースコードの読み込みに失敗しました: {e}"
 
         # システム指示（プロンプト職人としての設定）
         self.system_instruction = (
@@ -557,7 +678,25 @@ class PromptConsultationWindow:
         self.entry.bind("<Return>", lambda e: self.send_message())
         btn = tk.Button(self.window, text="送信 (Enter)", command=self.send_message, bg="#e1f5fe")
         btn.pack(pady=(0, 10))
-        self.display_message("AI", "こんにちは！① どんなファイルが格納されたフォルダから、② どんな項目を抜き出したり生成したりしたいですか？")
+        self.display_message("AI", (
+            "こんにちは！指示文（プロンプト）の作成をサポートします。\n"
+            "指示文の典型的な書き方は、次のようなものです。\n\n"
+            "【例：フォルダ内の見積書と提案書を解析する場合】\n\n"
+            "⇒ 指示文の例：\n"
+            "--------------------------------------------\n"
+            "###使用するSQLiteのパス\n"
+            "\"C:\\data\\MasterData.db\"\n\n"
+            "出力項目: 会社名, 合計金額, 提案の要約, 顧客ランク\n\n"
+            "### 処理指示\n"
+            "・【会社名】：【抽出】見積書に記載されている発行元の会社名。\n"
+            "・【合計金額】：【抽出】見積書の税込み合計金額。数値のみ。\n"
+            "・【提案の要約】：【生成】提案書の内容を100文字以内で要約。\n"
+            "・【顧客ランク】：【生成】MasterData.顧客マスタを参照し、【会社名】の取引ランクを取得。\n"
+            "--------------------------------------------\n\n"
+            "※項目名を【項目名】と書くことで、AIが他の抽出・生成結果を参照して計算や照合に利用できます。\n"
+            "※外部DB参照時は必ず「エイリアス名.テーブル名」の形式で指定してください。\n\n"
+            "今回は、どのような抽出やデータ生成を行いたいですか？"
+        ))
 
     def display_message(self, sender, text):
         self.txt_area.config(state="normal")

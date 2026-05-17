@@ -1,5 +1,5 @@
 =====================================================
- TextExtractor2 v1.0.0 - README
+ TextExtractor2 v1.1.0 - README
 =====================================================
 
 人間が整理した「フォルダ分け」をそのままAIの解析単位にする。
@@ -66,7 +66,7 @@ Copyright (c) 2026 Datan (データン).
 Licensed under the MIT License.
 
 =====================================================
- TextExtractor2 v1.0.0 - README (English)
+ TextExtractor2 v1.1.0 - README (English)
 =====================================================
 
 Treat "Folder Structures" organized by humans as the unit of AI analysis.

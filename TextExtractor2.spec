@@ -5,7 +5,7 @@ a = Analysis(
     ['textextractor2.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('textextractor2.py', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
